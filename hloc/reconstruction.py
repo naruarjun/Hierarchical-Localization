@@ -30,12 +30,13 @@ def import_images(image_dir: Path,
                   options: Optional[Dict[str, Any]] = None):
     logger.info('Importing images into the database...')
     if options is None:
-        options = {}
+        # options = pycolmap.ImageReaderOptions(camera_model = "PINHOLE", camera_params = "718.3351,718.3351,600.3891,181.5122")
+        options = pycolmap.ImageReaderOptions(camera_model = "PINHOLE", camera_params = "552.554261,552.554261,682.049453,238.769549")
     images = list(image_dir.iterdir())
     if len(images) == 0:
         raise IOError(f'No images found in {image_dir}.')
     with pycolmap.ostream():
-        pycolmap.import_images(database_path, image_dir, camera_mode,
+        pycolmap.import_images(database_path, image_dir, pycolmap.CameraMode.SINGLE,
                                image_list=image_list or [],
                                options=options)
 
@@ -60,6 +61,7 @@ def run_reconstruction(sfm_dir: Path,
     logger.info('Running 3D reconstruction...')
     if options is None:
         options = {}
+    print("OPTIONS IS NOT NONE", options)
     options = {'num_threads': min(multiprocessing.cpu_count(), 16), **options}
     with OutputCapture(verbose):
         with pycolmap.ostream():
@@ -147,12 +149,14 @@ if __name__ == '__main__':
                             pycolmap.ImageReaderOptions().todict()))
     parser.add_argument('--mapper_options', nargs='+', default=[],
                         help='List of key=value from {}'.format(
-                            pycolmap.IncrementalMapperOptions().todict()))
+                            pycolmap.IncrementalMapperOptions(ba_refine_focal_length = False).todict()))
     args = parser.parse_args().__dict__
 
     image_options = parse_option_args(
         args.pop("image_options"), pycolmap.ImageReaderOptions())
+    # mapper_options = parse_option_args(
+        # args.pop("mapper_options"), pycolmap.IncrementalMapperOptions(ba_refine_focal_length = False))
     mapper_options = parse_option_args(
-        args.pop("mapper_options"), pycolmap.IncrementalMapperOptions())
+        ["ba_refine_focal_length = False"], pycolmap.IncrementalMapperOptions())
 
     main(**args, image_options=image_options, mapper_options=mapper_options)

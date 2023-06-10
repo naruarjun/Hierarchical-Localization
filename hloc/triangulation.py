@@ -253,6 +253,7 @@ def parse_option_args(args: List[str], default_options) -> Dict[str, Any]:
             raise ValueError(f'Incorrect type for option "{key}":'
                              f' {type(value)} vs {target_type}')
         options[key] = value
+    print("HERE ARE options", options)
     return options
 
 
