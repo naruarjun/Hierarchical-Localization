@@ -233,161 +233,153 @@ def main(conf: Dict,
          as_half: bool = True,
          image_list: Optional[Union[Path, List[str]]] = None,
          feature_path: Optional[Path] = None,
-         overwrite: bool = False) -> Path:
-    logger.info('Extracting local features with configuration:'
-                f'\n{pprint.pformat(conf)}')
+         overwrite: bool = False,
+        segmentation_path: str = None,
+        filter_classes = None) -> Path:
+    if segmentation_path is None:
+        logger.info('Extracting local features with configuration:'
+                    f'\n{pprint.pformat(conf)}')
 
-    dataset = ImageDataset(image_dir, conf['preprocessing'], image_list)
-    if feature_path is None:
-        feature_path = Path(export_dir, conf['output']+'.h5')
-    feature_path.parent.mkdir(exist_ok=True, parents=True)
-    skip_names = set(list_h5_names(feature_path)
-                     if feature_path.exists() and not overwrite else ())
-    dataset.names = [n for n in dataset.names if n not in skip_names]
-    if len(dataset.names) == 0:
-        logger.info('Skipping the extraction.')
+        dataset = ImageDataset(image_dir, conf['preprocessing'], image_list)
+        if feature_path is None:
+            feature_path = Path(export_dir, conf['output']+'.h5')
+        feature_path.parent.mkdir(exist_ok=True, parents=True)
+        skip_names = set(list_h5_names(feature_path)
+                        if feature_path.exists() and not overwrite else ())
+        dataset.names = [n for n in dataset.names if n not in skip_names]
+        if len(dataset.names) == 0:
+            logger.info('Skipping the extraction.')
+            return feature_path
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        Model = dynamic_load(extractors, conf['model']['name'])
+        model = Model(conf['model']).eval().to(device)
+
+        loader = torch.utils.data.DataLoader(
+            dataset, num_workers=1, shuffle=False, pin_memory=True)
+        for idx, data in enumerate(tqdm(loader)):
+            name = dataset.names[idx]
+            pred = model({'image': data['image'].to(device, non_blocking=True)})
+            pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
+
+            pred['image_size'] = original_size = data['original_size'][0].numpy()
+            if 'keypoints' in pred:
+                size = np.array(data['image'].shape[-2:][::-1])
+                scales = (original_size / size).astype(np.float32)
+                pred['keypoints'] = (pred['keypoints'] + .5) * scales[None] - .5
+                if 'scales' in pred:
+                    pred['scales'] *= scales.mean()
+                # add keypoint uncertainties scaled to the original resolution
+                uncertainty = getattr(model, 'detection_noise', 1) * scales.mean()
+
+            if as_half:
+                for k in pred:
+                    dt = pred[k].dtype
+                    if (dt == np.float32) and (dt != np.float16):
+                        pred[k] = pred[k].astype(np.float16)
+
+            with h5py.File(str(feature_path), 'a', libver='latest') as fd:
+                try:
+                    if name in fd:
+                        del fd[name]
+                    grp = fd.create_group(name)
+                    for k, v in pred.items():
+                        grp.create_dataset(k, data=v)
+                    if 'keypoints' in pred:
+                        grp['keypoints'].attrs['uncertainty'] = uncertainty
+                except OSError as error:
+                    if 'No space left on device' in error.args[0]:
+                        logger.error(
+                            'Out of disk space: storing features on disk can take '
+                            'significant space, did you enable the as_half flag?')
+                        del grp, fd[name]
+                    raise error
+
+            del pred
+
+        logger.info('Finished exporting features.')
         return feature_path
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    Model = dynamic_load(extractors, conf['model']['name'])
-    model = Model(conf['model']).eval().to(device)
-
-    loader = torch.utils.data.DataLoader(
-        dataset, num_workers=1, shuffle=False, pin_memory=True)
-    for idx, data in enumerate(tqdm(loader)):
-        name = dataset.names[idx]
-        pred = model({'image': data['image'].to(device, non_blocking=True)})
-        pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
-
-        pred['image_size'] = original_size = data['original_size'][0].numpy()
-        if 'keypoints' in pred:
-            size = np.array(data['image'].shape[-2:][::-1])
-            scales = (original_size / size).astype(np.float32)
-            pred['keypoints'] = (pred['keypoints'] + .5) * scales[None] - .5
-            if 'scales' in pred:
-                pred['scales'] *= scales.mean()
-            # add keypoint uncertainties scaled to the original resolution
-            uncertainty = getattr(model, 'detection_noise', 1) * scales.mean()
-
-        if as_half:
-            for k in pred:
-                dt = pred[k].dtype
-                if (dt == np.float32) and (dt != np.float16):
-                    pred[k] = pred[k].astype(np.float16)
-
-        with h5py.File(str(feature_path), 'a', libver='latest') as fd:
-            try:
-                if name in fd:
-                    del fd[name]
-                grp = fd.create_group(name)
-                for k, v in pred.items():
-                    grp.create_dataset(k, data=v)
-                if 'keypoints' in pred:
-                    grp['keypoints'].attrs['uncertainty'] = uncertainty
-            except OSError as error:
-                if 'No space left on device' in error.args[0]:
-                    logger.error(
-                        'Out of disk space: storing features on disk can take '
-                        'significant space, did you enable the as_half flag?')
-                    del grp, fd[name]
-                raise error
-
-        del pred
-
-    logger.info('Finished exporting features.')
-    return feature_path
-
-# @torch.no_grad()
-# def main(conf: Dict,
-#          image_dir: Path,
-#          export_dir: Optional[Path] = None,
-#          as_half: bool = True,
-#          image_list: Optional[Union[Path, List[str]]] = None,
-#          feature_path: Optional[Path] = None,
-#          overwrite: bool = False,
-#         segmentation_path: str = None,
-#         filter_classes = None) -> Path:
-#     logger.info('Extracting local features with configuration:'
-#                 f'\n{pprint.pformat(conf)}')
-#     dataset = ImageDataset(image_dir, conf['preprocessing'], image_list)
-#     if feature_path is None:
-#         feature_path = Path(export_dir, conf['output']+'.h5')
-#     feature_path.parent.mkdir(exist_ok=True, parents=True)
-#     skip_names = set(list_h5_names(feature_path)
-#                      if feature_path.exists() and not overwrite else ())
-#     dataset.names = [n for n in dataset.names if n not in skip_names]
-#     if len(dataset.names) == 0:
-#         logger.info('Skipping the extraction.')
-#         return feature_path
-#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-#     Model = dynamic_load(extractors, conf['model']['name'])
-#     model = Model(conf['model']).eval().to(device)
-#     loader = torch.utils.data.DataLoader(
-#         dataset, num_workers=1, shuffle=False, pin_memory=True)
-#     # segmentation_files = []
-#     seg_masks = []
-#     segmentation_files = None
-#     if segmentation_path:
-#         segmentation_files = sorted(glob(segmentation_path + "*.png"))
-#         for seg_file in segmentation_files:
-#             seg_masks.append(read_image(seg_file, False))#     print(seg_masks[0])    
-#     for idx, data in enumerate(tqdm(loader)):
-#         name = dataset.names[idx]
-#         # print(name, idx, int(os.path.basename(name)[:-4]))
-#         seg_mask = seg_masks[int(os.path.basename(name)[:-4]) - 2130]
-# #         print(seg_mask.shape)
-#         pred = model({'image': data['image'].to(device, non_blocking=True)})
-# #         pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
-#         pred_copy = {}
-#         for k, v in pred.items():
-# #             print(v[0].cpu().numpy().shape)
-#             if k == 'keypoints':
-#                 kps = v[0].cpu().numpy()
-#                 filtered_indices = []
-#                 for idx_, kp in enumerate(kps):
-# #                     print(kp[0], seg_mask[int(kp[0]), int(kp[1])])
-#                     if seg_mask[int(kp[1]), int(kp[0])][0] in filter_classes:
-#                         filtered_indices.append(idx_)
-#             # print(len(filtered_indices))
-#             if k == 'descriptors':
-#                 pred_copy[k] = v[0].cpu().numpy()[:, filtered_indices]
-#             else:
-#                 pred_copy[k] = v[0].cpu().numpy()[filtered_indices]
-#         pred = pred_copy
-#         pred['image_size'] = original_size = data['original_size'][0].numpy()
-#         if 'keypoints' in pred:
-#             size = np.array(data['image'].shape[-2:][::-1])
-#             scales = (original_size / size).astype(np.float32)
-#             pred['keypoints'] = (pred['keypoints'] + .5) * scales[None] - .5
-#             if 'scales' in pred:
-#                 pred['scales'] *= scales.mean()
-#             # add keypoint uncertainties scaled to the original resolution
-#             uncertainty = getattr(model, 'detection_noise', 1) * scales.mean()
-#         if as_half:
-#             for k in pred:
-#                 dt = pred[k].dtype
-#                 if (dt == np.float32) and (dt != np.float16):
-#                     pred[k] = pred[k].astype(np.float16)
-#         with h5py.File(str(feature_path), 'a', libver='latest') as fd:
-#             try:
-#                 if name in fd:
-#                     del fd[name]
-#                 grp = fd.create_group(name)
-#                 for k, v in pred.items():
-#                     grp.create_dataset(k, data=v)
-#                 if 'keypoints' in pred:
-#                     grp['keypoints'].attrs['uncertainty'] = uncertainty
-#             except OSError as error:
-#                 if 'No space left on device' in error.args[0]:
-#                     logger.error(
-#                         'Out of disk space: storing features on disk can take '
-#                         'significant space, did you enable the as_half flag?')
-#                     del grp, fd[name]
-#                 raise error
-#         del pred    
-#     logger.info('Finished exporting features.')
-#     return feature_path
-
+    else:
+        logger.info('Extracting local features with configuration:'
+                    f'\n{pprint.pformat(conf)}')
+        dataset = ImageDataset(image_dir, conf['preprocessing'], image_list)
+        if feature_path is None:
+            feature_path = Path(export_dir, conf['output']+'.h5')
+        feature_path.parent.mkdir(exist_ok=True, parents=True)
+        skip_names = set(list_h5_names(feature_path)
+                        if feature_path.exists() and not overwrite else ())
+        dataset.names = [n for n in dataset.names if n not in skip_names]
+        if len(dataset.names) == 0:
+            logger.info('Skipping the extraction.')
+            return feature_path
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        Model = dynamic_load(extractors, conf['model']['name'])
+        model = Model(conf['model']).eval().to(device)
+        loader = torch.utils.data.DataLoader(
+            dataset, num_workers=1, shuffle=False, pin_memory=True)
+        # segmentation_files = []
+        seg_masks = []
+        segmentation_files = None
+        if segmentation_path:
+            segmentation_files = sorted(glob(segmentation_path + "*.png"))
+            for seg_file in segmentation_files:
+                seg_masks.append(read_image(seg_file, False))#     print(seg_masks[0])    
+        for idx, data in enumerate(tqdm(loader)):
+            name = dataset.names[idx]
+            # print(name, idx, int(os.path.basename(name)[:-4]))
+            seg_mask = seg_masks[int(os.path.basename(name)[:-4]) - 2130]
+    #         print(seg_mask.shape)
+            pred = model({'image': data['image'].to(device, non_blocking=True)})
+    #         pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
+            pred_copy = {}
+            for k, v in pred.items():
+    #             print(v[0].cpu().numpy().shape)
+                if k == 'keypoints':
+                    kps = v[0].cpu().numpy()
+                    filtered_indices = []
+                    for idx_, kp in enumerate(kps):
+    #                     print(kp[0], seg_mask[int(kp[0]), int(kp[1])])
+                        if seg_mask[int(kp[1]), int(kp[0])][0] in filter_classes:
+                            filtered_indices.append(idx_)
+                # print(len(filtered_indices))
+                if k == 'descriptors':
+                    pred_copy[k] = v[0].cpu().numpy()[:, filtered_indices]
+                else:
+                    pred_copy[k] = v[0].cpu().numpy()[filtered_indices]
+            pred = pred_copy
+            pred['image_size'] = original_size = data['original_size'][0].numpy()
+            if 'keypoints' in pred:
+                size = np.array(data['image'].shape[-2:][::-1])
+                scales = (original_size / size).astype(np.float32)
+                pred['keypoints'] = (pred['keypoints'] + .5) * scales[None] - .5
+                if 'scales' in pred:
+                    pred['scales'] *= scales.mean()
+                # add keypoint uncertainties scaled to the original resolution
+                uncertainty = getattr(model, 'detection_noise', 1) * scales.mean()
+            if as_half:
+                for k in pred:
+                    dt = pred[k].dtype
+                    if (dt == np.float32) and (dt != np.float16):
+                        pred[k] = pred[k].astype(np.float16)
+            with h5py.File(str(feature_path), 'a', libver='latest') as fd:
+                try:
+                    if name in fd:
+                        del fd[name]
+                    grp = fd.create_group(name)
+                    for k, v in pred.items():
+                        grp.create_dataset(k, data=v)
+                    if 'keypoints' in pred:
+                        grp['keypoints'].attrs['uncertainty'] = uncertainty
+                except OSError as error:
+                    if 'No space left on device' in error.args[0]:
+                        logger.error(
+                            'Out of disk space: storing features on disk can take '
+                            'significant space, did you enable the as_half flag?')
+                        del grp, fd[name]
+                    raise error
+            del pred    
+        logger.info('Finished exporting features.')
+        return feature_path
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
