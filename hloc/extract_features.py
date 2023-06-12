@@ -324,10 +324,15 @@ def main(conf: Dict,
             segmentation_files = sorted(glob(segmentation_path + "*.png"))
             for seg_file in segmentation_files:
                 seg_masks.append(read_image(seg_file, False))#     print(seg_masks[0])    
+        idx_list = []
+        for idx, data in enumerate(loader):
+            name = dataset.names[idx]
+            idx_list.append(int(os.path.basename(name)[:-4]))
+        min_idx = np.array(idx_list).min()
         for idx, data in enumerate(tqdm(loader)):
             name = dataset.names[idx]
             # print(name, idx, int(os.path.basename(name)[:-4]))
-            seg_mask = seg_masks[int(os.path.basename(name)[:-4]) - 2130]
+            seg_mask = seg_masks[int(os.path.basename(name)[:-4]) - min_idx]
     #         print(seg_mask.shape)
             pred = model({'image': data['image'].to(device, non_blocking=True)})
     #         pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
